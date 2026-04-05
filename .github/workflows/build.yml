@@ -48,8 +48,8 @@ jobs:
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -58,7 +58,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ secrets.DOCKERHUB_USERNAME }}/job-hunter
+          images: ${{ secrets.DOCKER_USERNAME }}/job-hunter
           tags: |
             type=sha,prefix=
             type=raw,value=latest,enable={{is_default_branch}}
@@ -72,3 +72,28 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy to VPS via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USERNAME }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            # Pull latest image
+            docker pull ${{ secrets.DOCKER_USERNAME }}/job-hunter:latest
+
+            # Setup crontab if not already configured
+            CRON_JOB="0 */4 * * * docker run --rm --env-file ~/job-hunter/.env -v ~/job-hunter/data:/app/data -v ~/job-hunter/logs:/app/logs ${{ secrets.DOCKER_USERNAME }}/job-hunter:latest >> ~/job-hunter/logs/cron.log 2>&1"
+            mkdir -p ~/job-hunter/data ~/job-hunter/logs
+
+            # Add crontab only if not already present
+            (crontab -l 2>/dev/null | grep -v "job-hunter" ; echo "$CRON_JOB") | crontab -
+
+            echo "Deployed successfully. Crontab set to run every 4 hours."
+            crontab -l | grep job-hunter
