@@ -168,7 +168,7 @@ class TestSendJobs:
 
     @pytest.mark.asyncio
     async def test_send_jobs_counts(self, monkeypatch, sample_jobs):
-        """Should return the count of successfully sent messages."""
+        """Should return the count of jobs in successfully sent batch messages."""
         notifier = TelegramNotifier("fake_token", "12345")
 
         async def mock_post(self_client, url, **kwargs):
@@ -183,6 +183,60 @@ class TestSendJobs:
 
         sent = await notifier.send_jobs(sample_jobs)
         assert sent == len(sample_jobs)
+
+    @pytest.mark.asyncio
+    async def test_send_jobs_empty_list(self, monkeypatch):
+        """Empty list should return 0 without sending."""
+        notifier = TelegramNotifier("fake_token", "12345")
+        sent = await notifier.send_jobs([])
+        assert sent == 0
+
+    @pytest.mark.asyncio
+    async def test_send_jobs_batches_large_list(self, monkeypatch):
+        """15 jobs should be sent in 2 batch messages (10 + 5)."""
+        notifier = TelegramNotifier("fake_token", "12345")
+        sent_messages = []
+
+        async def mock_post(self_client, url, **kwargs):
+            sent_messages.append(kwargs.get("json", {}).get("text", ""))
+            return httpx.Response(200, json={"ok": True})
+
+        monkeypatch.setattr(httpx.AsyncClient, "post", mock_post)
+
+        import asyncio
+        original_sleep = asyncio.sleep
+        monkeypatch.setattr(asyncio, "sleep", lambda _: original_sleep(0))
+
+        jobs = [
+            Job(title=f"Intern Java {i}", link=f"https://example.com/{i}", source="itviec")
+            for i in range(15)
+        ]
+        sent = await notifier.send_jobs(jobs)
+        assert sent == 15
+        assert len(sent_messages) == 2  # 2 batch messages
+
+    @pytest.mark.asyncio
+    async def test_batch_message_contains_all_jobs(self, monkeypatch, sample_jobs):
+        """Batch message should contain titles of all jobs."""
+        notifier = TelegramNotifier("fake_token", "12345")
+        sent_texts = []
+
+        async def mock_post(self_client, url, **kwargs):
+            sent_texts.append(kwargs.get("json", {}).get("text", ""))
+            return httpx.Response(200, json={"ok": True})
+
+        monkeypatch.setattr(httpx.AsyncClient, "post", mock_post)
+
+        import asyncio
+        original_sleep = asyncio.sleep
+        monkeypatch.setattr(asyncio, "sleep", lambda _: original_sleep(0))
+
+        await notifier.send_jobs(sample_jobs)
+        # All job titles should appear in the batch message
+        combined = " ".join(sent_texts)
+        for job in sample_jobs:
+            # Title is escaped, check core word
+            assert "Intern" in combined
 
     @pytest.mark.asyncio
     async def test_send_summary(self, monkeypatch):

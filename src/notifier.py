@@ -87,20 +87,50 @@ class TelegramNotifier:
         message = self._format_job_message(job)
         return await self.send_message(message)
 
+    def _format_batch_message(self, jobs: list[Job], page: int, total_pages: int) -> str:
+        """Format a batch of jobs into a single Telegram message (MarkdownV2)."""
+        header = f"🔔 *Tìm thấy {len(jobs)} job Intern mới\\!*"
+        if total_pages > 1:
+            header += f" \\(trang {page}/{total_pages}\\)"
+        header += "\n"
+
+        lines = [header]
+        for i, job in enumerate(jobs, start=1):
+            title = self._escape_md(job.title)
+            source = self._escape_md(job.source.upper())
+            lines.append(
+                f"{i}\\. [{title}]({job.link})\n"
+                f"    🏢 `{source}`\n"
+            )
+
+        return "\n".join(lines)
+
     async def send_jobs(self, jobs: list[Job]) -> int:
-        """Send multiple job notifications with rate limiting. Returns count of sent."""
+        """Send job notifications in batched messages (max ~10 jobs per message).
+
+        Telegram has a ~4096 char limit per message, so we chunk into pages.
+        Returns count of jobs in successfully sent messages.
+        """
+        if not jobs:
+            return 0
+
+        # Chunk jobs into batches (10 jobs per message ≈ ~2000 chars, safely under 4096)
+        BATCH_SIZE = 10
+        batches = [jobs[i:i + BATCH_SIZE] for i in range(0, len(jobs), BATCH_SIZE)]
+        total_pages = len(batches)
         sent_count = 0
 
-        for i, job in enumerate(jobs):
-            success = await self.send_job(job)
+        for page_num, batch in enumerate(batches, start=1):
+            message = self._format_batch_message(batch, page_num, total_pages)
+            success = await self.send_message(message)
             if success:
-                sent_count += 1
+                sent_count += len(batch)
 
-            # Rate limit: ~1 message per second (Telegram allows ~30/s but be safe)
-            if i < len(jobs) - 1:
+            # Rate limit between batches
+            if page_num < total_pages:
                 await asyncio.sleep(1.0)
 
-        logger.info("Sent %d/%d job notifications", sent_count, len(jobs))
+        logger.info("Sent %d/%d job notifications in %d messages", sent_count, len(jobs), total_pages)
         return sent_count
 
     async def send_summary(self, total_scraped: int, new_count: int, total_in_db: int) -> bool:

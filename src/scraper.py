@@ -56,15 +56,34 @@ class Job:
 # ──────────────────────────────────────────────
 # Job MUST contain at least one tech keyword (to avoid unrelated jobs like sales)
 TECH_KEYWORDS = ["java", "spring", "backend", "back-end", "developer", "engineer", "lập trình"]
-# Bonus: prefer intern/fresher, but not required (senior Java jobs are still relevant)
+# Job MUST contain at least one level keyword (to filter out senior/lead positions)
 LEVEL_KEYWORDS = ["intern", "thực tập", "fresher", "junior"]
+# Negative keywords — immediately disqualify
+EXCLUDE_KEYWORDS = ["senior", "lead", "manager", "principal", "architect", "staff", "expert", "trưởng"]
 
 
 def _is_relevant_job(title: str) -> bool:
-    """Check if a job title is related to Java/Spring development."""
+    """Check if a job title is an intern/fresher-level Java/Spring job.
+
+    Rules:
+      1. Must contain at least one TECH keyword (java, spring, backend, etc.)
+      2. Must contain at least one LEVEL keyword (intern, fresher, junior, etc.)
+      3. Must NOT contain any EXCLUDE keyword (senior, lead, manager, etc.)
+    """
     title_lower = title.lower()
+
+    # Rule 3: reject senior/lead/manager immediately
+    if any(kw in title_lower for kw in EXCLUDE_KEYWORDS):
+        return False
+
+    # Rule 1: must be tech-related
     has_tech = any(kw in title_lower for kw in TECH_KEYWORDS)
-    return has_tech
+    if not has_tech:
+        return False
+
+    # Rule 2: must be intern/fresher/junior level
+    has_level = any(kw in title_lower for kw in LEVEL_KEYWORDS)
+    return has_level
 
 
 # ──────────────────────────────────────────────

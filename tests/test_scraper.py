@@ -4,7 +4,7 @@ Unit tests for the scraper module (data model & helpers, no browser needed).
 
 import pytest
 
-from src.scraper import Job, JobScraper
+from src.scraper import Job, JobScraper, _is_relevant_job
 
 
 class TestJobDataclass:
@@ -84,3 +84,67 @@ class TestScraperDedup:
         assert len(unique_jobs) == 2
         assert unique_jobs[0].title == "Job A"
         assert unique_jobs[1].title == "Job B"
+
+
+class TestRelevanceFilter:
+    """Test the _is_relevant_job filter logic."""
+
+    # ── Should PASS (intern/fresher + tech keyword) ──
+    def test_intern_java_spring_boot(self):
+        assert _is_relevant_job("Intern Java Spring Boot") is True
+
+    def test_fresher_backend_developer(self):
+        assert _is_relevant_job("Fresher Backend Developer (Java)") is True
+
+    def test_junior_java_developer(self):
+        assert _is_relevant_job("Junior Java Developer") is True
+
+    def test_thuc_tap_lap_trinh_java(self):
+        """Vietnamese keywords should work."""
+        assert _is_relevant_job("Thực tập lập trình Java") is True
+
+    def test_intern_spring_boot_developer(self):
+        assert _is_relevant_job("Intern Spring Boot Developer") is True
+
+    # ── Should FAIL (senior/lead — excluded) ──
+    def test_senior_java_rejected(self):
+        assert _is_relevant_job("Senior Java Developer") is False
+
+    def test_senior_backend_engineer_rejected(self):
+        assert _is_relevant_job("Senior Backend Engineer (Java/Spring Boot)") is False
+
+    def test_lead_java_rejected(self):
+        assert _is_relevant_job("Lead Java Engineer") is False
+
+    def test_technical_lead_rejected(self):
+        assert _is_relevant_job("Technical Lead (Kotlin/Java)") is False
+
+    def test_manager_rejected(self):
+        assert _is_relevant_job("Java Project Manager") is False
+
+    def test_architect_rejected(self):
+        assert _is_relevant_job("Java Architect") is False
+
+    # ── Should FAIL (no level keyword) ──
+    def test_java_developer_no_level(self):
+        """'Java Developer' has tech but no intern/fresher/junior."""
+        assert _is_relevant_job("Java Developer") is False
+
+    def test_backend_engineer_no_level(self):
+        assert _is_relevant_job("Backend Engineer (Java, Spring Boot)") is False
+
+    # ── Should FAIL (no tech keyword) ──
+    def test_intern_sales(self):
+        """Intern but not tech-related."""
+        assert _is_relevant_job("Intern Sales Executive") is False
+
+    def test_fresher_marketing(self):
+        assert _is_relevant_job("Fresher Marketing Specialist") is False
+
+    # ── Edge cases ──
+    def test_case_insensitive(self):
+        assert _is_relevant_job("INTERN JAVA SPRING BOOT") is True
+        assert _is_relevant_job("intern java spring boot") is True
+
+    def test_empty_string(self):
+        assert _is_relevant_job("") is False
