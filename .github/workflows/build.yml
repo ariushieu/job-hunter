@@ -1,6 +1,6 @@
 # ───────────────────────────────────────────────────────────────
 # CD: Build Docker image & push to GitHub Container Registry
-# Runs on push to master (after tests pass) or manual trigger
+# Runs on push to master or manual trigger
 # ───────────────────────────────────────────────────────────────
 name: CD - Build & Push Docker
 
@@ -11,16 +11,35 @@ on:
       - "*.md"
       - "plan/**"
       - "tests/**"
-  workflow_dispatch:  # Allow manual trigger
+  workflow_dispatch: # Allow manual trigger
 
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  # Wait for tests to pass first
   test:
-    uses: ./.github/workflows/test.yml
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -e .
+
+      - name: Run tests
+        env:
+          TELEGRAM_BOT_TOKEN: fake_token_for_ci
+          TELEGRAM_CHAT_ID: "000000000"
+        run: pytest -v --tb=short
 
   build-and-push:
     needs: test
