@@ -1,7 +1,7 @@
 # ──────────────────────────────────────────────
 # Base image with Playwright browsers pre-installed
 # ──────────────────────────────────────────────
-FROM mcr.microsoft.com/playwright/python:v1.52.0-noble
+FROM mcr.microsoft.com/playwright/python:v1.58.0-noble
 
 WORKDIR /app
 
