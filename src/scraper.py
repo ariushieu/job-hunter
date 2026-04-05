@@ -57,7 +57,7 @@ class Job:
 # Job MUST contain at least one tech keyword (to avoid unrelated jobs like sales)
 TECH_KEYWORDS = ["java", "spring", "backend", "back-end", "developer", "engineer", "lập trình"]
 # Job MUST contain at least one level keyword (to filter out senior/lead positions)
-LEVEL_KEYWORDS = ["intern", "thực tập", "fresher", "junior"]
+LEVEL_KEYWORDS = ["intern", "thực tập", "fresher"]
 # Negative keywords — immediately disqualify
 EXCLUDE_KEYWORDS = ["senior", "lead", "manager", "principal", "architect", "staff", "expert", "trưởng"]
 

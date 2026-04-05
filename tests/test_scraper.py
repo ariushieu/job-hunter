@@ -97,7 +97,8 @@ class TestRelevanceFilter:
         assert _is_relevant_job("Fresher Backend Developer (Java)") is True
 
     def test_junior_java_developer(self):
-        assert _is_relevant_job("Junior Java Developer") is True
+        """Junior is no longer in LEVEL_KEYWORDS — should be rejected."""
+        assert _is_relevant_job("Junior Java Developer") is False
 
     def test_thuc_tap_lap_trinh_java(self):
         """Vietnamese keywords should work."""
