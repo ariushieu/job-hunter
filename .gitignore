@@ -1,0 +1,46 @@
+# Environment variables (NEVER push secrets)
+.env
+
+# Database
+data/
+
+# Logs
+logs/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environment
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+.docker/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Claude Code
+.claude/
+
+# Egg info (editable install)
+*.egg-info/

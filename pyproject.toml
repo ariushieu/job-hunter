@@ -1,0 +1,29 @@
+[project]
+name = "job-hunter"
+version = "1.0.0"
+description = "Automated Intern Java Spring Boot job finder with Telegram notifications"
+requires-python = ">=3.10"
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["src*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-v --tb=short --strict-markers"
+markers = [
+    "slow: marks tests that take a long time (deselect with '-m \"not slow\"')",
+    "integration: marks integration tests that need real credentials",
+]
+
+[tool.coverage.run]
+source = ["src"]
+omit = ["src/__main__.py"]
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 30

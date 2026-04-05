@@ -1,0 +1,17 @@
+services:
+  job-hunter:
+    build: .
+    container_name: job-hunter
+    env_file:
+      - .env
+    volumes:
+      # Persist job database and logs between runs
+      - ./data:/app/data
+      - ./logs:/app/logs
+    restart: "no"
+    # Resource limits (optional, good practice on VPS)
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: "1.0"
