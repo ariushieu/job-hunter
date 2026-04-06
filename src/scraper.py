@@ -3,9 +3,8 @@ Scraper module - Crawl job listings from Vietnamese job sites using Playwright +
 
 Supported sites:
   - ITviec.com (Cloudflare protected - stealth + scroll bypass)
-  - TopCV.vn (Vue.js SPA - human-like search interaction)
+  - TopCV.vn (Vue.js SPA - direct URL search)
   - VietnamWorks.com (fallback)
-  - CareerBuilder.vn (fallback)
 """
 
 import asyncio
@@ -309,173 +308,105 @@ class JobScraper:
     # ── TopCV ──────────────────────────────────
 
     async def scrape_topcv(self) -> list[Job]:
-        """Scrape TopCV.vn by interacting like a real user (search from homepage)."""
+        """Scrape TopCV.vn using direct search URL (Vue.js SPA — search box unreliable).
+
+        Strategy: search broad keyword "java" to get all Java jobs, then filter
+        with _is_relevant_job() for intern/fresher positions.
+        TopCV search URL: /tim-viec-lam-{keyword}?type_keyword=0&sba=1
+        Job links pattern: a[href*="/viec-lam/"][href*=".html"]
+        """
         jobs: list[Job] = []
         page: Optional[Page] = None
 
+        # Search broad keywords — TopCV returns 0 for "intern java",
+        # but ~87 for "java" which we filter locally
+        search_keywords = ["java", "java-spring", "java-spring-boot"]
+
         try:
             page = await self._new_stealth_page()
-            logger.info("[TopCV] Navigating to homepage")
 
-            # Step 1: Go to homepage
-            await page.goto(
-                "https://www.topcv.vn",
-                wait_until="domcontentloaded",
-                timeout=config.PAGE_LOAD_TIMEOUT,
-            )
-            await self._random_delay(2, 4)
-            await self._human_scroll(page, steps=2)
-            await self._human_mouse_move(page, moves=2)
+            for kw_idx, keyword in enumerate(search_keywords):
+                url = f"https://www.topcv.vn/tim-viec-lam-{keyword}?type_keyword=0&sba=1"
+                logger.info("[TopCV] Navigating to %s", url)
 
-            # Step 2: Find search box and type keyword like a human
-            search_selectors = [
-                "#keyword",
-                "input[name='keyword']",
-                "input[placeholder*='Tìm']",
-                "input[placeholder*='tìm']",
-                "input[type='text'][class*='search']",
-                "input.input-search-job",
-            ]
+                await page.goto(url, wait_until="domcontentloaded", timeout=config.PAGE_LOAD_TIMEOUT)
+                await self._random_delay(2, 4)
+                await self._human_scroll(page, steps=3)
+                await self._human_mouse_move(page, moves=2)
+                await self._random_delay(1, 3)
 
-            search_input = None
-            for sel in search_selectors:
+                # Wait for Vue.js to render job cards
                 try:
-                    search_input = await page.wait_for_selector(sel, timeout=5000)
-                    if search_input:
-                        logger.info("[TopCV] Found search input: %s", sel)
-                        break
-                except Exception:
-                    continue
-
-            if not search_input:
-                logger.warning("[TopCV] Could not find search input, trying direct URL")
-                await page.goto(
-                    "https://www.topcv.vn/tim-viec-lam-intern-java-spring-boot",
-                    wait_until="domcontentloaded",
-                    timeout=config.PAGE_LOAD_TIMEOUT,
-                )
-                await self._random_delay(2, 3)
-            else:
-                # Type keyword like a human
-                keyword = random.choice(config.SEARCH_KEYWORDS[:3])
-                logger.info("[TopCV] Typing keyword: '%s'", keyword)
-
-                await search_input.click()
-                await asyncio.sleep(random.uniform(0.3, 0.8))
-
-                # Clear any existing text
-                await page.keyboard.press("Control+a")
-                await asyncio.sleep(0.2)
-
-                # Type character by character
-                for char in keyword:
-                    await page.keyboard.type(char, delay=random.randint(
-                        config.TYPING_DELAY_MIN, config.TYPING_DELAY_MAX
-                    ))
-
-                await self._random_delay(0.5, 1.5)
-
-                # Press Enter to search
-                logger.info("[TopCV] Pressing Enter to search")
-                await page.keyboard.press("Enter")
-
-            # Step 3: Wait for results to render (Vue.js)
-            # NOTE: avoid "networkidle" — Vue.js keeps background requests alive
-            await self._random_delay(3, 5)
-            try:
-                await page.wait_for_selector(
-                    ".job-item-search-result, .job-item, div[class*='job-item']",
-                    timeout=20000,
-                )
-            except Exception:
-                logger.warning("[TopCV] Job selectors not found after search")
-            await self._human_scroll(page, steps=3)
-
-            # Step 4: Extract job listings
-            # TopCV uses h3 > a for title/link inside .job-item-search-result
-            selector_chains = [
-                # Strategy 1: current TopCV layout (2025-2026) — h3 contains <a> with title+link
-                {
-                    "container": ".job-item-search-result",
-                    "title": "h3 a",
-                    "title_attr": None,  # use inner_text for title
-                },
-                # Strategy 2: aria-label approach
-                {
-                    "container": ".job-item-search-result",
-                    "title": "a[aria-label]",
-                    "title_attr": "aria-label",
-                },
-                # Strategy 3: broad fallback
-                {
-                    "container": "div[class*='job-item']",
-                    "title": "a[href*='/viec-lam/'], a[href*='/brand/'], a[href*='/tuyen-dung/']",
-                    "title_attr": "aria-label",
-                },
-            ]
-
-            for strategy_idx, strategy in enumerate(selector_chains):
-                try:
-                    containers = await page.query_selector_all(strategy["container"])
-                    if not containers:
-                        logger.debug(
-                            "[TopCV] Strategy %d: no containers with '%s'",
-                            strategy_idx, strategy["container"],
-                        )
-                        continue
-
-                    logger.info(
-                        "[TopCV] Strategy %d: found %d job containers",
-                        strategy_idx, len(containers),
+                    await page.wait_for_selector(
+                        "a[href*='/viec-lam/'][href*='.html'], .job-item-search-result, h3",
+                        timeout=15000,
                     )
+                except Exception:
+                    logger.warning("[TopCV] Job selectors not found for keyword '%s'", keyword)
 
-                    for container in containers:
-                        try:
-                            link_el = await container.query_selector(strategy["title"])
-                            if not link_el:
-                                continue
+                await self._human_scroll(page, steps=2)
+                await self._random_delay(1, 2)
 
-                            # Get title from aria-label attr or inner text
-                            title_attr = strategy.get("title_attr")
-                            if title_attr:
-                                title = (await link_el.get_attribute(title_attr) or "").strip()
-                            if not title_attr or not title:
-                                title = (await link_el.inner_text()).strip()
+                # Extract job links — TopCV uses <a> with href="/viec-lam/{slug}/{id}.html"
+                job_links = await page.query_selector_all(
+                    "a[href*='/viec-lam/'][href*='.html']"
+                )
+                logger.info("[TopCV] Keyword '%s': found %d raw job links", keyword, len(job_links))
 
-                            href = await link_el.get_attribute("href")
+                seen_in_keyword: set[str] = set()
 
-                            if not title or not href:
-                                continue
-
-                            full_link = urljoin("https://www.topcv.vn", href)
-
-                            if not _is_relevant_job(title):
-                                logger.debug("[TopCV] Skipping irrelevant: %s", title[:50])
-                                continue
-
-                            jobs.append(Job(
-                                title=title,
-                                link=full_link,
-                                source="topcv",
-                            ))
-                        except Exception as e:
-                            logger.debug("[TopCV] Error parsing job card: %s", e)
+                for link_el in job_links:
+                    try:
+                        href = await link_el.get_attribute("href")
+                        if not href or href in seen_in_keyword:
                             continue
 
-                    if jobs:
-                        break
+                        # Only accept job detail URLs: /viec-lam/{slug}/{id}.html
+                        # Skip filter/category links
+                        if "/tim-viec-lam" in href:
+                            continue
 
-                except Exception as e:
-                    logger.debug("[TopCV] Strategy %d failed: %s", strategy_idx, e)
-                    continue
+                        # Try to get title from h3 inside the link, or from inner_text
+                        title_el = await link_el.query_selector("h3, span[class*='title']")
+                        if title_el:
+                            title = (await title_el.inner_text()).strip()
+                        else:
+                            title = (await link_el.inner_text()).strip()
 
-            # Check for empty results
-            if not jobs:
-                page_text = await page.inner_text("body")
-                if "0 việc làm" in page_text or "không tìm thấy" in page_text.lower():
-                    logger.info("[TopCV] No jobs found for this keyword")
+                        if not title or len(title) < 5:
+                            continue
 
-            logger.info("[TopCV] Scraped %d jobs", len(jobs))
+                        full_link = urljoin("https://www.topcv.vn", href)
+                        # Remove tracking params for cleaner dedup
+                        full_link = full_link.split("?")[0]
+
+                        if full_link in seen_in_keyword:
+                            continue
+                        seen_in_keyword.add(full_link)
+
+                        if not _is_relevant_job(title):
+                            logger.debug("[TopCV] Skipping irrelevant: %s", title[:60])
+                            continue
+
+                        jobs.append(Job(
+                            title=title,
+                            link=full_link,
+                            source="topcv",
+                        ))
+                    except Exception as e:
+                        logger.debug("[TopCV] Error parsing job link: %s", e)
+                        continue
+
+                # Delay between keywords
+                if kw_idx < len(search_keywords) - 1:
+                    await self._random_delay(3, 6)
+
+                # If first keyword already got results, skip narrow ones
+                if jobs and kw_idx == 0:
+                    logger.info("[TopCV] Got %d jobs from broad search, skipping narrow keywords", len(jobs))
+                    break
+
+            logger.info("[TopCV] Scraped %d jobs total", len(jobs))
 
         except Exception as e:
             logger.error("[TopCV] Scraping failed: %s", e, exc_info=True)
@@ -574,91 +505,6 @@ class JobScraper:
 
         return jobs
 
-    # ── CareerBuilder (fallback) ───────────────
-
-    async def scrape_careerbuilder(self) -> list[Job]:
-        """Scrape CareerBuilder.vn as a fallback source."""
-        jobs: list[Job] = []
-        page: Optional[Page] = None
-
-        try:
-            page = await self._new_stealth_page()
-            keyword = random.choice(config.SEARCH_KEYWORDS[:2])
-            url = f"https://careerbuilder.vn/viec-lam/{keyword.replace(' ', '-')}-k-vi.html"
-            logger.info("[CareerBuilder] Navigating to %s", url)
-
-            await page.goto(url, wait_until="domcontentloaded", timeout=config.PAGE_LOAD_TIMEOUT)
-            await self._random_delay(2, 4)
-            await self._human_scroll(page, steps=3)
-            await self._human_mouse_move(page, moves=2)
-            await self._random_delay(1, 3)
-
-            selector_chains = [
-                {
-                    "container": "div.job-item, div.job-list-default div.list-item",
-                    "title": "a.job_link, a[class*='title'], h3.title a, h3 a, a",
-                },
-                {
-                    "container": "div[class*='job'], li[class*='job']",
-                    "title": "a[href*='careerbuilder.vn/vi/'], a[href*='/viec-lam/'], h3 a, a",
-                },
-            ]
-
-            for strategy_idx, strategy in enumerate(selector_chains):
-                try:
-                    containers = await page.query_selector_all(strategy["container"])
-                    if not containers:
-                        continue
-
-                    logger.info(
-                        "[CareerBuilder] Strategy %d: found %d job containers",
-                        strategy_idx, len(containers),
-                    )
-
-                    for container in containers:
-                        try:
-                            link_el = await container.query_selector(strategy["title"])
-                            if not link_el:
-                                continue
-
-                            title = (await link_el.inner_text()).strip()
-                            href = await link_el.get_attribute("href")
-
-                            if not title or not href:
-                                continue
-
-                            full_link = urljoin("https://careerbuilder.vn", href)
-
-                            if not _is_relevant_job(title):
-                                logger.debug("[CareerBuilder] Skipping irrelevant: %s", title[:50])
-                                continue
-
-                            jobs.append(Job(
-                                title=title,
-                                link=full_link,
-                                source="careerbuilder",
-                            ))
-                        except Exception as e:
-                            logger.debug("[CareerBuilder] Error parsing job card: %s", e)
-                            continue
-
-                    if jobs:
-                        break
-
-                except Exception as e:
-                    logger.debug("[CareerBuilder] Strategy %d failed: %s", strategy_idx, e)
-                    continue
-
-            logger.info("[CareerBuilder] Scraped %d jobs", len(jobs))
-
-        except Exception as e:
-            logger.error("[CareerBuilder] Scraping failed: %s", e, exc_info=True)
-        finally:
-            if page:
-                await page.close()
-
-        return jobs
-
     # ── Orchestrator ───────────────────────────
 
     async def scrape_all(self) -> list[Job]:
@@ -669,7 +515,6 @@ class JobScraper:
             ("ITviec", self.scrape_itviec),
             ("TopCV", self.scrape_topcv),
             ("VietnamWorks", self.scrape_vietnamworks),
-            ("CareerBuilder", self.scrape_careerbuilder),
         ]
 
         for name, scraper_fn in scrapers:

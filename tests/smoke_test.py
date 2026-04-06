@@ -96,7 +96,6 @@ async def smoke_test() -> None:
             ("ITviec", scraper.scrape_itviec),
             ("TopCV", scraper.scrape_topcv),
             ("VietnamWorks", scraper.scrape_vietnamworks),
-            ("CareerBuilder", scraper.scrape_careerbuilder),
         ]:
             try:
                 logger.info("  Scraping %s...", site_name)
