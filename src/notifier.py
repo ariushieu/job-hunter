@@ -140,7 +140,7 @@ class TelegramNotifier:
             f"🔍 Đã quét: `{total_scraped}` jobs\n"
             f"🆕 Job mới: `{new_count}`\n"
             f"💾 Tổng trong DB: `{total_in_db}`\n\n"
-            f"⏰ Lần chạy tiếp: ~4 tiếng nữa"
+            f"⏰ Lần chạy tiếp: \\~4 tiếng nữa"
         )
         return await self.send_message(text)
 

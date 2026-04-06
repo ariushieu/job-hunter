@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 class Job:
     title: str
     link: str
-    source: str  # "itviec" | "topcv" | "vietnamworks" | "careerbuilder"
+    source: str  # "itviec" | "topcv" | "vietnamworks"
     found_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
@@ -191,109 +191,129 @@ class JobScraper:
     # ── ITviec ─────────────────────────────────
 
     async def scrape_itviec(self) -> list[Job]:
-        """Scrape ITviec.com with Cloudflare bypass strategy."""
+        """Scrape ITviec.com with Cloudflare bypass strategy.
+
+        Strategy: search broad keywords ("java spring boot", "java spring")
+        to get all Java jobs, then filter with _is_relevant_job() for
+        intern/fresher positions. Narrow queries like "intern spring boot"
+        return only senior results on ITviec.
+        """
         jobs: list[Job] = []
         page: Optional[Page] = None
 
+        # Broad search — ITviec returns 0 interns for "intern spring boot"
+        # but 20+ results for "java spring boot" (includes interns)
+        search_keywords = ["java spring boot", "java spring", "java intern"]
+
         try:
             page = await self._new_stealth_page()
-            keyword = random.choice(config.SEARCH_KEYWORDS[:3])
-            url = f"https://itviec.com/it-jobs?query={keyword.replace(' ', '+')}"
-            logger.info("[ITviec] Navigating to %s", url)
 
-            await page.goto(url, wait_until="domcontentloaded", timeout=config.PAGE_LOAD_TIMEOUT)
-            await self._random_delay(2, 4)
+            for kw_idx, keyword in enumerate(search_keywords):
+                url = f"https://itviec.com/it-jobs?query={keyword.replace(' ', '+')}"
+                logger.info("[ITviec] Navigating to %s", url)
 
-            # Critical: scroll to bypass Cloudflare sensor
-            logger.info("[ITviec] Performing human-like scroll to bypass CF")
-            await self._human_scroll(page, steps=4)
-            await self._human_mouse_move(page, moves=3)
-            await self._random_delay(2, 4)
+                await page.goto(url, wait_until="domcontentloaded", timeout=config.PAGE_LOAD_TIMEOUT)
+                await self._random_delay(2, 4)
 
-            # Wait for content to appear after CF challenge
-            # NOTE: avoid "networkidle" — Cloudflare keeps connections alive, causing timeout
-            try:
-                await page.wait_for_selector(
-                    "div.job-card, div.job_content, a[href*='/it-jobs/']",
-                    timeout=20000,
-                )
-            except Exception:
-                logger.warning("[ITviec] Job selectors not found, page may be blocked")
+                # Critical: scroll to bypass Cloudflare sensor
+                logger.info("[ITviec] Performing human-like scroll to bypass CF")
+                await self._human_scroll(page, steps=4)
+                await self._human_mouse_move(page, moves=3)
+                await self._random_delay(2, 4)
 
-            # Check if we got blocked (CF challenge page)
-            page_content = await page.content()
-            if "Just a moment" in page_content or "challenge-platform" in page_content:
-                logger.warning("[ITviec] Cloudflare challenge detected, waiting...")
-                await asyncio.sleep(8)
-                await self._human_scroll(page, steps=2)
-                await asyncio.sleep(3)
-
-            # Try multiple selector strategies (sites change HTML often)
-            # ITviec uses h3 with data-url attribute (NOT <a> inside h3)
-            selector_chains = [
-                # Strategy 1: current ITviec layout (2025-2026)
-                # h3 has text=title and data-url=link
-                {
-                    "container": "div.job-card",
-                    "title_el": "h3",
-                    "link_attr": "data-url",  # special: link is in data-url on h3
-                },
-                # Strategy 2: fallback with <a> tags
-                {
-                    "container": "div.job_content, div[data-search-result]",
-                    "title_el": "h3 a, h2 a, a[href*='/it-jobs/']",
-                    "link_attr": "href",
-                },
-            ]
-
-            for strategy_idx, strategy in enumerate(selector_chains):
+                # Wait for content to appear after CF challenge
+                # NOTE: avoid "networkidle" — Cloudflare keeps connections alive, causing timeout
                 try:
-                    containers = await page.query_selector_all(strategy["container"])
-                    if not containers:
-                        logger.debug(
-                            "[ITviec] Strategy %d: no containers found with '%s'",
-                            strategy_idx, strategy["container"],
-                        )
-                        continue
-
-                    logger.info(
-                        "[ITviec] Strategy %d: found %d job containers",
-                        strategy_idx, len(containers),
+                    await page.wait_for_selector(
+                        "div.job-card, div.job_content, a[href*='/it-jobs/']",
+                        timeout=20000,
                     )
+                except Exception:
+                    logger.warning("[ITviec] Job selectors not found, page may be blocked")
 
-                    for container in containers:
-                        try:
-                            el = await container.query_selector(strategy["title_el"])
-                            if not el:
-                                continue
+                # Check if we got blocked (CF challenge page)
+                page_content = await page.content()
+                if "Just a moment" in page_content or "challenge-platform" in page_content:
+                    logger.warning("[ITviec] Cloudflare challenge detected, waiting...")
+                    await asyncio.sleep(8)
+                    await self._human_scroll(page, steps=2)
+                    await asyncio.sleep(3)
 
-                            title = (await el.inner_text()).strip()
-                            href = await el.get_attribute(strategy["link_attr"])
+                # Try multiple selector strategies (sites change HTML often)
+                # ITviec uses h3 with data-url attribute (NOT <a> inside h3)
+                selector_chains = [
+                    # Strategy 1: current ITviec layout (2025-2026)
+                    # h3 has text=title and data-url=link
+                    {
+                        "container": "div.job-card",
+                        "title_el": "h3[data-url]",
+                        "link_attr": "data-url",
+                    },
+                    # Strategy 2: fallback with <a> tags
+                    {
+                        "container": "div.job_content, div[data-search-result]",
+                        "title_el": "h3 a, h2 a, a[href*='/it-jobs/']",
+                        "link_attr": "href",
+                    },
+                ]
 
-                            if not title or not href:
-                                continue
-
-                            full_link = urljoin("https://itviec.com", href)
-
-                            if not _is_relevant_job(title):
-                                logger.debug("[ITviec] Skipping irrelevant: %s", title[:50])
-                                continue
-
-                            jobs.append(Job(
-                                title=title,
-                                link=full_link,
-                                source="itviec",
-                            ))
-                        except Exception as e:
-                            logger.debug("[ITviec] Error parsing single job card: %s", e)
+                for strategy_idx, strategy in enumerate(selector_chains):
+                    try:
+                        containers = await page.query_selector_all(strategy["container"])
+                        if not containers:
+                            logger.debug(
+                                "[ITviec] Strategy %d: no containers found with '%s'",
+                                strategy_idx, strategy["container"],
+                            )
                             continue
 
-                    if jobs:
-                        break  # Got results, stop trying other strategies
+                        logger.info(
+                            "[ITviec] Strategy %d: found %d job containers",
+                            strategy_idx, len(containers),
+                        )
 
-                except Exception as e:
-                    logger.debug("[ITviec] Strategy %d failed: %s", strategy_idx, e)
-                    continue
+                        for container in containers:
+                            try:
+                                el = await container.query_selector(strategy["title_el"])
+                                if not el:
+                                    continue
+
+                                title = (await el.inner_text()).strip()
+                                href = await el.get_attribute(strategy["link_attr"])
+
+                                if not title or not href:
+                                    continue
+
+                                full_link = urljoin("https://itviec.com", href)
+
+                                if not _is_relevant_job(title):
+                                    logger.debug("[ITviec] Skipping irrelevant: %s", title[:50])
+                                    continue
+
+                                jobs.append(Job(
+                                    title=title,
+                                    link=full_link,
+                                    source="itviec",
+                                ))
+                            except Exception as e:
+                                logger.debug("[ITviec] Error parsing single job card: %s", e)
+                                continue
+
+                        if jobs:
+                            break  # Got results, stop trying other strategies
+
+                    except Exception as e:
+                        logger.debug("[ITviec] Strategy %d failed: %s", strategy_idx, e)
+                        continue
+
+                # If got jobs from this keyword, skip remaining keywords
+                if jobs:
+                    logger.info("[ITviec] Got %d jobs from '%s', skipping remaining keywords", len(jobs), keyword)
+                    break
+
+                # Delay between keywords
+                if kw_idx < len(search_keywords) - 1:
+                    await self._random_delay(5, 10)
 
             logger.info("[ITviec] Scraped %d jobs", len(jobs))
 
@@ -329,20 +349,29 @@ class JobScraper:
                 url = f"https://www.topcv.vn/tim-viec-lam-{keyword}?type_keyword=0&sba=1"
                 logger.info("[TopCV] Navigating to %s", url)
 
-                await page.goto(url, wait_until="domcontentloaded", timeout=config.PAGE_LOAD_TIMEOUT)
+                # Use networkidle — Vue.js SPA needs AJAX calls to complete
+                await page.goto(url, wait_until="networkidle", timeout=45000)
                 await self._random_delay(2, 4)
                 await self._human_scroll(page, steps=3)
                 await self._human_mouse_move(page, moves=2)
                 await self._random_delay(1, 3)
 
-                # Wait for Vue.js to render job cards
+                # Wait for Vue.js to render actual job cards
                 try:
                     await page.wait_for_selector(
-                        "a[href*='/viec-lam/'][href*='.html'], .job-item-search-result, h3",
-                        timeout=15000,
+                        ".job-item-search-result",
+                        timeout=20000,
                     )
                 except Exception:
-                    logger.warning("[TopCV] Job selectors not found for keyword '%s'", keyword)
+                    logger.warning("[TopCV] .job-item-search-result not found for '%s', trying fallback", keyword)
+                    # Fallback: wait a bit more for any job-related content
+                    try:
+                        await page.wait_for_selector(
+                            "a[href*='/viec-lam/'][href*='.html']",
+                            timeout=10000,
+                        )
+                    except Exception:
+                        logger.warning("[TopCV] No job elements found for keyword '%s'", keyword)
 
                 await self._human_scroll(page, steps=2)
                 await self._random_delay(1, 2)
@@ -419,81 +448,128 @@ class JobScraper:
     # ── VietnamWorks (fallback) ────────────────
 
     async def scrape_vietnamworks(self) -> list[Job]:
-        """Scrape VietnamWorks.com as a fallback source."""
+        """Scrape VietnamWorks.com (React/Next.js SPA — needs networkidle).
+
+        Strategy: search broad keyword "java" to get all Java jobs, then filter
+        with _is_relevant_job() for intern/fresher positions.
+        VietnamWorks renders job cards client-side via React hydration.
+        """
         jobs: list[Job] = []
         page: Optional[Page] = None
 
+        # Broad search — "intern java" returns very few, "java" returns 50+
+        search_keywords = ["java", "java spring boot"]
+
         try:
             page = await self._new_stealth_page()
-            keyword = random.choice(config.SEARCH_KEYWORDS[:2])
-            url = f"https://www.vietnamworks.com/viec-lam?q={keyword.replace(' ', '+')}&sort=date"
-            logger.info("[VietnamWorks] Navigating to %s", url)
 
-            await page.goto(url, wait_until="domcontentloaded", timeout=config.PAGE_LOAD_TIMEOUT)
-            await self._random_delay(2, 4)
-            await self._human_scroll(page, steps=3)
-            await self._human_mouse_move(page, moves=2)
-            await self._random_delay(1, 3)
+            for kw_idx, keyword in enumerate(search_keywords):
+                url = f"https://www.vietnamworks.com/viec-lam?q={keyword.replace(' ', '+')}&sort=date"
+                logger.info("[VietnamWorks] Navigating to %s", url)
 
-            selector_chains = [
-                {
-                    "container": "div[class*='JobCard'], div[class*='job-card']",
-                    "title": "a[class*='title'], h3 a, h2 a, a[class*='job']",
-                },
-                {
-                    "container": "div[class*='job-item'], div[class*='search-result']",
-                    "title": "a[href*='vietnamworks.com'], a[href*='/job/'], h3 a, h2 a, a",
-                },
-                {
-                    "container": "div.job-item, li.job-item, div[class*='result']",
-                    "title": "a[href*='-jv'], a[href*='/job/'], a[href*='/viec-lam/'], a",
-                },
-            ]
+                # Use networkidle — React SPA needs JS execution + API calls
+                await page.goto(url, wait_until="networkidle", timeout=45000)
+                await self._random_delay(2, 4)
+                await self._human_scroll(page, steps=3)
+                await self._human_mouse_move(page, moves=2)
+                await self._random_delay(1, 3)
 
-            for strategy_idx, strategy in enumerate(selector_chains):
+                # Wait for React to render actual job cards (not skeleton loaders)
                 try:
-                    containers = await page.query_selector_all(strategy["container"])
-                    if not containers:
-                        continue
-
-                    logger.info(
-                        "[VietnamWorks] Strategy %d: found %d job containers",
-                        strategy_idx, len(containers),
+                    await page.wait_for_selector(
+                        ".new-job-card, .block-job-list",
+                        timeout=20000,
                     )
+                except Exception:
+                    logger.warning("[VietnamWorks] Job cards not rendered for '%s', trying fallback", keyword)
+                    # Fallback: wait a bit more
+                    try:
+                        await page.wait_for_selector(
+                            "a[href*='-jv'], a[href*='/viec-lam/']",
+                            timeout=10000,
+                        )
+                    except Exception:
+                        logger.warning("[VietnamWorks] No job elements found for keyword '%s'", keyword)
 
-                    for container in containers:
-                        try:
-                            link_el = await container.query_selector(strategy["title"])
-                            if not link_el:
-                                continue
+                await self._human_scroll(page, steps=2)
+                await self._random_delay(1, 2)
 
-                            title = (await link_el.inner_text()).strip()
-                            href = await link_el.get_attribute("href")
+                selector_chains = [
+                    # Strategy 1: Current VietnamWorks layout (2025-2026)
+                    # .new-job-card is the actual job card after React renders
+                    {
+                        "container": ".new-job-card",
+                        "title": "a[href*='-jv'], a[href*='/viec-lam/'], h3 a, h2 a",
+                    },
+                    # Strategy 2: block-job-list wrapper
+                    {
+                        "container": ".block-job-list .job-item, .search-result-listJob .job-item",
+                        "title": "a[href*='-jv'], h3 a, h2 a, a",
+                    },
+                    # Strategy 3: generic fallbacks
+                    {
+                        "container": "div[class*='JobCard'], div[class*='job-card']",
+                        "title": "a[class*='title'], h3 a, h2 a, a[class*='job']",
+                    },
+                    {
+                        "container": "div[class*='job-item'], div[class*='search-result']",
+                        "title": "a[href*='vietnamworks.com'], a[href*='/job/'], h3 a, h2 a, a",
+                    },
+                ]
 
-                            if not title or not href:
-                                continue
-
-                            full_link = urljoin("https://www.vietnamworks.com", href)
-
-                            if not _is_relevant_job(title):
-                                logger.debug("[VietnamWorks] Skipping irrelevant: %s", title[:50])
-                                continue
-
-                            jobs.append(Job(
-                                title=title,
-                                link=full_link,
-                                source="vietnamworks",
-                            ))
-                        except Exception as e:
-                            logger.debug("[VietnamWorks] Error parsing job card: %s", e)
+                for strategy_idx, strategy in enumerate(selector_chains):
+                    try:
+                        containers = await page.query_selector_all(strategy["container"])
+                        if not containers:
                             continue
 
-                    if jobs:
-                        break
+                        logger.info(
+                            "[VietnamWorks] Strategy %d: found %d job containers",
+                            strategy_idx, len(containers),
+                        )
 
-                except Exception as e:
-                    logger.debug("[VietnamWorks] Strategy %d failed: %s", strategy_idx, e)
-                    continue
+                        for container in containers:
+                            try:
+                                link_el = await container.query_selector(strategy["title"])
+                                if not link_el:
+                                    continue
+
+                                title = (await link_el.inner_text()).strip()
+                                href = await link_el.get_attribute("href")
+
+                                if not title or not href:
+                                    continue
+
+                                full_link = urljoin("https://www.vietnamworks.com", href)
+
+                                if not _is_relevant_job(title):
+                                    logger.debug("[VietnamWorks] Skipping irrelevant: %s", title[:50])
+                                    continue
+
+                                jobs.append(Job(
+                                    title=title,
+                                    link=full_link,
+                                    source="vietnamworks",
+                                ))
+                            except Exception as e:
+                                logger.debug("[VietnamWorks] Error parsing job card: %s", e)
+                                continue
+
+                        if jobs:
+                            break  # Got results, stop trying other strategies
+
+                    except Exception as e:
+                        logger.debug("[VietnamWorks] Strategy %d failed: %s", strategy_idx, e)
+                        continue
+
+                # If got jobs, skip remaining keywords
+                if jobs:
+                    logger.info("[VietnamWorks] Got %d jobs from '%s', skipping remaining keywords", len(jobs), keyword)
+                    break
+
+                # Delay between keywords
+                if kw_idx < len(search_keywords) - 1:
+                    await self._random_delay(5, 10)
 
             logger.info("[VietnamWorks] Scraped %d jobs", len(jobs))
 
