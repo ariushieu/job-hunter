@@ -272,14 +272,25 @@ class JobScraper:
                             strategy_idx, len(containers),
                         )
 
+                        parsed_count = 0
                         for container in containers:
                             try:
                                 el = await container.query_selector(strategy["title_el"])
                                 if not el:
+                                    # DEBUG: log what's actually inside
+                                    if parsed_count < 3:
+                                        inner = await container.inner_html()
+                                        logger.info("[ITviec] DEBUG container (no title_el match): %s", inner[:300])
+                                    parsed_count += 1
                                     continue
 
                                 title = (await el.inner_text()).strip()
                                 href = await el.get_attribute(strategy["link_attr"])
+
+                                # DEBUG: log what we found
+                                if parsed_count < 5:
+                                    logger.info("[ITviec] DEBUG title='%s' href='%s'", title[:80], str(href)[:120])
+                                parsed_count += 1
 
                                 if not title or not href:
                                     continue
@@ -287,7 +298,7 @@ class JobScraper:
                                 full_link = urljoin("https://itviec.com", href)
 
                                 if not _is_relevant_job(title):
-                                    logger.debug("[ITviec] Skipping irrelevant: %s", title[:50])
+                                    logger.info("[ITviec] Skipping irrelevant: %s", title[:80])
                                     continue
 
                                 jobs.append(Job(
@@ -375,6 +386,23 @@ class JobScraper:
 
                 await self._human_scroll(page, steps=2)
                 await self._random_delay(1, 2)
+
+                # DEBUG: dump page snippet to see what rendered
+                page_text = await page.content()
+                logger.info("[TopCV] DEBUG page length: %d chars", len(page_text))
+                # Check for key markers
+                if "job-item-search-result" in page_text:
+                    logger.info("[TopCV] DEBUG: .job-item-search-result FOUND in HTML")
+                if "/viec-lam/" in page_text and ".html" in page_text:
+                    logger.info("[TopCV] DEBUG: /viec-lam/*.html links FOUND in HTML")
+                # Log a snippet around job listings
+                idx = page_text.find("job-item-search-result")
+                if idx > 0:
+                    logger.info("[TopCV] DEBUG snippet: %s", page_text[idx:idx+500])
+                else:
+                    idx = page_text.find("viec-lam")
+                    if idx > 0:
+                        logger.info("[TopCV] DEBUG snippet: %s", page_text[max(0,idx-50):idx+300])
 
                 # Extract job links — TopCV uses <a> with href="/viec-lam/{slug}/{id}.html"
                 job_links = await page.query_selector_all(
@@ -528,14 +556,25 @@ class JobScraper:
                             strategy_idx, len(containers),
                         )
 
+                        parsed_count = 0
                         for container in containers:
                             try:
                                 link_el = await container.query_selector(strategy["title"])
                                 if not link_el:
+                                    # DEBUG: log inner HTML
+                                    if parsed_count < 3:
+                                        inner = await container.inner_html()
+                                        logger.info("[VietnamWorks] DEBUG container (no title match, strat %d): %s", strategy_idx, inner[:300])
+                                    parsed_count += 1
                                     continue
 
                                 title = (await link_el.inner_text()).strip()
                                 href = await link_el.get_attribute("href")
+
+                                # DEBUG: log what we found
+                                if parsed_count < 5:
+                                    logger.info("[VietnamWorks] DEBUG strat %d: title='%s' href='%s'", strategy_idx, title[:80], str(href)[:120])
+                                parsed_count += 1
 
                                 if not title or not href:
                                     continue
@@ -543,7 +582,7 @@ class JobScraper:
                                 full_link = urljoin("https://www.vietnamworks.com", href)
 
                                 if not _is_relevant_job(title):
-                                    logger.debug("[VietnamWorks] Skipping irrelevant: %s", title[:50])
+                                    logger.info("[VietnamWorks] Skipping irrelevant: %s", title[:80])
                                     continue
 
                                 jobs.append(Job(
