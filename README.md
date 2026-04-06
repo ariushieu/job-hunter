@@ -4,12 +4,14 @@ Công cụ tự động tìm kiếm việc làm **Intern Java Spring Boot** từ
 
 ## ✨ Tính năng
 
-- 🤖 Tự động cào job từ 4 nguồn: ITviec, TopCV, VietnamWorks, CareerBuilder
+- 🤖 Tự động cào job từ 3 nguồn: ITviec, TopCV, VietnamWorks
+- 🎯 Filter thông minh: chỉ lấy vị trí Intern/Fresher Java/Spring Boot
 - 🛡️ Bypass anti-bot với Playwright + stealth (giả lập hành vi người thật)
-- 🔔 Gửi thông báo real-time qua Telegram Bot
+- 🔔 Gửi thông báo batch qua Telegram Bot (10 jobs/message)
 - 💾 Lọc trùng lặp với TinyDB (không gửi lại job cũ)
 - 🐳 Deploy dễ dàng với Docker
 - ⏰ Chạy tự động mỗi 4 tiếng với crontab
+- 📊 Summary report sau mỗi lần chạy
 
 ## 🚀 Quick Start
 
@@ -187,16 +189,40 @@ job-hunter/
 
 ## 🔧 Configuration
 
-### Search keywords
+### Job filter rules
 
-Chỉnh sửa trong `src/config.py`:
+Filter trong `src/scraper.py`:
 
 ```python
-SEARCH_KEYWORDS = [
-    "intern java spring boot",
-    "intern java",
-    "thực tập java",
-]
+# Job MUST contain tech keywords
+TECH_KEYWORDS = ["java", "spring", "backend", "back-end", "developer", "engineer", "lập trình"]
+
+# Job MUST contain level keywords (intern/fresher only)
+LEVEL_KEYWORDS = ["intern", "thực tập", "fresher"]
+
+# Job MUST NOT contain these (auto-reject)
+EXCLUDE_KEYWORDS = ["senior", "lead", "manager", "principal", "architect", "staff", "expert", "trưởng"]
+```
+
+### Search strategy
+
+- **ITviec**: Search broad "java spring boot" → filter local (narrow search returns only senior jobs)
+- **TopCV**: Direct URL `/tim-viec-lam-java` → filter local (Vue.js SPA)
+- **VietnamWorks**: Search broad "java" → filter local (React/Next.js SPA)
+
+### Search keywords
+
+Chỉnh sửa trong `src/scraper.py` (mỗi site có keywords riêng):
+
+```python
+# ITviec
+search_keywords = ["java spring boot", "java spring", "java intern"]
+
+# TopCV
+search_keywords = ["java", "java-spring", "java-spring-boot"]
+
+# VietnamWorks
+search_keywords = ["java", "java spring boot"]
 ```
 
 ### Cron schedule
@@ -216,6 +242,75 @@ Thay đổi trong crontab:
 0 9 * * * ...
 ```
 
+## 🏗️ Architecture
+
+### Scraping Strategy
+
+**ITviec (Cloudflare protected):**
+
+- Playwright + stealth patches
+- Human-like scroll to bypass CF sensor
+- Search broad keywords → filter local
+- Selector: `h3[data-url]` (data-url attribute contains job link)
+
+**TopCV (Vue.js SPA):**
+
+- Direct URL search (search box unreliable)
+- Wait for `networkidle` (AJAX completion)
+- Extract from `a[href*='/viec-lam/'][href*='.html']`
+- Search broad → filter local
+
+**VietnamWorks (React/Next.js SPA):**
+
+- Wait for `networkidle` (client-side hydration)
+- Selector: `.new-job-card` (rendered after React hydration)
+- Search broad → filter local
+
+### Filter Logic
+
+```
+1. Check EXCLUDE_KEYWORDS → reject if match (senior, lead, etc.)
+2. Check TECH_KEYWORDS → reject if no match (java, spring, etc.)
+3. Check LEVEL_KEYWORDS → reject if no match (intern, fresher)
+4. Accept job
+```
+
+### Data Flow
+
+```
+Cron (every 4h)
+  ↓
+Docker run
+  ↓
+Scraper.scrape_all()
+  ├─ ITviec → 0-20 jobs
+  ├─ TopCV → 0-50 jobs
+  └─ VietnamWorks → 0-50 jobs
+  ↓
+Filter duplicates (by link)
+  ↓
+Database.save_if_new()
+  ↓
+Notifier.send_jobs() (batch 10/msg)
+  ↓
+Notifier.send_summary()
+```
+
+## 📊 Performance
+
+**Typical run:**
+
+- Duration: ~2-3 minutes
+- CPU spike: ~40% (Playwright rendering)
+- Memory: ~500MB peak
+- Disk: <1MB per run (logs + DB)
+
+**Success rate (as of Apr 2026):**
+
+- ITviec: ~70% (Cloudflare sometimes blocks)
+- TopCV: ~50% (Vue.js rendering issues)
+- VietnamWorks: ~60% (React hydration timing)
+
 ## 🐛 Troubleshooting
 
 ### Playwright error: Executable doesn't exist
@@ -233,9 +328,30 @@ docker build --no-cache -t job-hunter .
 
 ### Không tìm thấy job nào
 
-- Các trang web thường xuyên thay đổi HTML structure
-- Kiểm tra logs để xem site nào bị fail
-- Có thể cần update CSS selectors trong `src/scraper.py`
+**Nguyên nhân phổ biến:**
+
+1. **Selector outdated**: Các trang web thường xuyên thay đổi HTML structure
+   - Kiểm tra logs: `tail -f ~/job-hunter/logs/job_hunter.log`
+   - Tìm dòng "Strategy X: found Y containers" → nếu Y > 0 nhưng scraped = 0 → selector bị lỗi
+
+2. **Filter quá strict**: Job bị reject vì không match filter rules
+   - Xem logs: `[Source] Skipping irrelevant: {title}`
+   - Nếu thấy nhiều jobs bị skip → cân nhắc nới lỏng filter
+
+3. **Anti-bot block**: Site phát hiện và block bot
+   - ITviec: Cloudflare challenge → logs sẽ có "challenge detected"
+   - TopCV/VietnamWorks: Timeout hoặc empty response
+
+**Debug:**
+
+```bash
+# Chạy thử và xem logs chi tiết
+docker run --rm \
+  --env-file ~/job-hunter/.env \
+  -v ~/job-hunter/data:/app/data \
+  -v ~/job-hunter/logs:/app/logs \
+  qhieu05/job-hunter:latest | grep -E "Strategy|Scraped|Skipping"
+```
 
 ### Crontab không chạy
 
