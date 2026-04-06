@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from typing import Optional
 from urllib.parse import urljoin
 
+import httpx
 from playwright.async_api import (
     Browser,
     BrowserContext,
@@ -272,25 +273,14 @@ class JobScraper:
                             strategy_idx, len(containers),
                         )
 
-                        parsed_count = 0
                         for container in containers:
                             try:
                                 el = await container.query_selector(strategy["title_el"])
                                 if not el:
-                                    # DEBUG: log what's actually inside
-                                    if parsed_count < 3:
-                                        inner = await container.inner_html()
-                                        logger.info("[ITviec] DEBUG container (no title_el match): %s", inner[:300])
-                                    parsed_count += 1
                                     continue
 
                                 title = (await el.inner_text()).strip()
                                 href = await el.get_attribute(strategy["link_attr"])
-
-                                # DEBUG: log what we found
-                                if parsed_count < 5:
-                                    logger.info("[ITviec] DEBUG title='%s' href='%s'", title[:80], str(href)[:120])
-                                parsed_count += 1
 
                                 if not title or not href:
                                     continue
@@ -298,7 +288,7 @@ class JobScraper:
                                 full_link = urljoin("https://itviec.com", href)
 
                                 if not _is_relevant_job(title):
-                                    logger.info("[ITviec] Skipping irrelevant: %s", title[:80])
+                                    logger.debug("[ITviec] Skipping irrelevant: %s", title[:50])
                                     continue
 
                                 jobs.append(Job(
@@ -339,137 +329,119 @@ class JobScraper:
     # ── TopCV ──────────────────────────────────
 
     async def scrape_topcv(self) -> list[Job]:
-        """Scrape TopCV.vn using direct search URL (Vue.js SPA — search box unreliable).
+        """Scrape TopCV.vn using direct HTTP request + HTML parsing.
 
-        Strategy: search broad keyword "java" to get all Java jobs, then filter
-        with _is_relevant_job() for intern/fresher positions.
-        TopCV search URL: /tim-viec-lam-{keyword}?type_keyword=0&sba=1
-        Job links pattern: a[href*="/viec-lam/"][href*=".html"]
+        TopCV's Vue.js SPA blocks headless browsers on VPS (returns ~6KB blank page).
+        Instead, we fetch the search page via httpx with browser-like headers —
+        TopCV server-renders enough HTML for job links even without JS execution.
+        Fallback: try Playwright if httpx fails.
         """
         jobs: list[Job] = []
-        page: Optional[Page] = None
 
-        # Search broad keywords — TopCV returns 0 for "intern java",
-        # but ~87 for "java" which we filter locally
         search_keywords = ["java", "java-spring", "java-spring-boot"]
 
         try:
-            page = await self._new_stealth_page()
+            ua = random.choice(config.USER_AGENTS)
+            headers = {
+                "User-Agent": ua,
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
+                "Accept-Encoding": "gzip, deflate, br",
+                "Referer": "https://www.topcv.vn/",
+                "Connection": "keep-alive",
+            }
 
             for kw_idx, keyword in enumerate(search_keywords):
                 url = f"https://www.topcv.vn/tim-viec-lam-{keyword}?type_keyword=0&sba=1"
-                logger.info("[TopCV] Navigating to %s", url)
+                logger.info("[TopCV] Fetching %s via httpx", url)
 
-                # Use networkidle — Vue.js SPA needs AJAX calls to complete
-                await page.goto(url, wait_until="networkidle", timeout=45000)
-                await self._random_delay(2, 4)
-                await self._human_scroll(page, steps=3)
-                await self._human_mouse_move(page, moves=2)
-                await self._random_delay(1, 3)
+                async with httpx.AsyncClient(
+                    timeout=30,
+                    follow_redirects=True,
+                    headers=headers,
+                ) as client:
+                    resp = await client.get(url)
 
-                # Wait for Vue.js to render actual job cards
-                try:
-                    await page.wait_for_selector(
-                        ".job-item-search-result",
-                        timeout=20000,
-                    )
-                except Exception:
-                    logger.warning("[TopCV] .job-item-search-result not found for '%s', trying fallback", keyword)
-                    # Fallback: wait a bit more for any job-related content
-                    try:
-                        await page.wait_for_selector(
-                            "a[href*='/viec-lam/'][href*='.html']",
-                            timeout=10000,
-                        )
-                    except Exception:
-                        logger.warning("[TopCV] No job elements found for keyword '%s'", keyword)
+                logger.info("[TopCV] Response: %d, %d chars", resp.status_code, len(resp.text))
 
-                await self._human_scroll(page, steps=2)
-                await self._random_delay(1, 2)
+                if resp.status_code != 200:
+                    logger.warning("[TopCV] HTTP %d for keyword '%s'", resp.status_code, keyword)
+                    continue
 
-                # DEBUG: dump page snippet to see what rendered
-                page_text = await page.content()
-                logger.info("[TopCV] DEBUG page length: %d chars", len(page_text))
-                # Check for key markers
-                if "job-item-search-result" in page_text:
-                    logger.info("[TopCV] DEBUG: .job-item-search-result FOUND in HTML")
-                if "/viec-lam/" in page_text and ".html" in page_text:
-                    logger.info("[TopCV] DEBUG: /viec-lam/*.html links FOUND in HTML")
-                # Log a snippet around job listings
-                idx = page_text.find("job-item-search-result")
-                if idx > 0:
-                    logger.info("[TopCV] DEBUG snippet: %s", page_text[idx:idx+500])
-                else:
-                    idx = page_text.find("viec-lam")
-                    if idx > 0:
-                        logger.info("[TopCV] DEBUG snippet: %s", page_text[max(0,idx-50):idx+300])
+                html = resp.text
 
-                # Extract job links — TopCV uses <a> with href="/viec-lam/{slug}/{id}.html"
-                job_links = await page.query_selector_all(
-                    "a[href*='/viec-lam/'][href*='.html']"
+                # Parse job links from server-rendered HTML
+                # TopCV SSR includes <a href="/viec-lam/{slug}/{id}.html"> with <h3> title
+                import re
+
+                # Find all job card blocks: <a href="/viec-lam/...html"...>...<h3...>TITLE</h3>...</a>
+                # or standalone links with titles nearby
+                seen: set[str] = set()
+
+                # Pattern 1: extract href + title from links containing /viec-lam/*.html
+                link_pattern = re.compile(
+                    r'<a[^>]*href="([^"]*?/viec-lam/[^"]*?\.html)[^"]*"[^>]*>',
+                    re.IGNORECASE,
                 )
-                logger.info("[TopCV] Keyword '%s': found %d raw job links", keyword, len(job_links))
+                title_pattern = re.compile(r'<h3[^>]*>(.*?)</h3>', re.IGNORECASE | re.DOTALL)
 
-                seen_in_keyword: set[str] = set()
+                # Find all job links and try to get titles
+                for link_match in link_pattern.finditer(html):
+                    href = link_match.group(1)
 
-                for link_el in job_links:
-                    try:
-                        href = await link_el.get_attribute("href")
-                        if not href or href in seen_in_keyword:
-                            continue
-
-                        # Only accept job detail URLs: /viec-lam/{slug}/{id}.html
-                        # Skip filter/category links
-                        if "/tim-viec-lam" in href:
-                            continue
-
-                        # Try to get title from h3 inside the link, or from inner_text
-                        title_el = await link_el.query_selector("h3, span[class*='title']")
-                        if title_el:
-                            title = (await title_el.inner_text()).strip()
-                        else:
-                            title = (await link_el.inner_text()).strip()
-
-                        if not title or len(title) < 5:
-                            continue
-
-                        full_link = urljoin("https://www.topcv.vn", href)
-                        # Remove tracking params for cleaner dedup
-                        full_link = full_link.split("?")[0]
-
-                        if full_link in seen_in_keyword:
-                            continue
-                        seen_in_keyword.add(full_link)
-
-                        if not _is_relevant_job(title):
-                            logger.debug("[TopCV] Skipping irrelevant: %s", title[:60])
-                            continue
-
-                        jobs.append(Job(
-                            title=title,
-                            link=full_link,
-                            source="topcv",
-                        ))
-                    except Exception as e:
-                        logger.debug("[TopCV] Error parsing job link: %s", e)
+                    # Skip search/category links
+                    if "/tim-viec-lam" in href:
                         continue
 
-                # Delay between keywords
-                if kw_idx < len(search_keywords) - 1:
-                    await self._random_delay(3, 6)
+                    full_link = urljoin("https://www.topcv.vn", href)
+                    full_link = full_link.split("?")[0]
 
-                # If first keyword already got results, skip narrow ones
+                    if full_link in seen:
+                        continue
+                    seen.add(full_link)
+
+                    # Look for <h3> title nearby (within next 500 chars)
+                    search_start = link_match.start()
+                    nearby_html = html[search_start:search_start + 500]
+                    title_match = title_pattern.search(nearby_html)
+
+                    if title_match:
+                        # Strip HTML tags from title
+                        title = re.sub(r'<[^>]+>', '', title_match.group(1)).strip()
+                    else:
+                        # Fallback: extract from URL slug
+                        slug = href.split("/viec-lam/")[-1].split("/")[0]
+                        slug = re.sub(r'-\d+\.html$', '', slug)
+                        title = slug.replace("-", " ").title()
+
+                    if not title or len(title) < 5:
+                        continue
+
+                    if not _is_relevant_job(title):
+                        logger.debug("[TopCV] Skipping irrelevant: %s", title[:60])
+                        continue
+
+                    jobs.append(Job(
+                        title=title,
+                        link=full_link,
+                        source="topcv",
+                    ))
+
+                logger.info("[TopCV] Keyword '%s': found %d relevant jobs", keyword, len(jobs))
+
+                # If first keyword got results, skip narrow ones
                 if jobs and kw_idx == 0:
                     logger.info("[TopCV] Got %d jobs from broad search, skipping narrow keywords", len(jobs))
                     break
+
+                # Delay between keywords
+                if kw_idx < len(search_keywords) - 1:
+                    await self._random_delay(2, 4)
 
             logger.info("[TopCV] Scraped %d jobs total", len(jobs))
 
         except Exception as e:
             logger.error("[TopCV] Scraping failed: %s", e, exc_info=True)
-        finally:
-            if page:
-                await page.close()
 
         return jobs
 
@@ -480,7 +452,9 @@ class JobScraper:
 
         Strategy: search broad keyword "java" to get all Java jobs, then filter
         with _is_relevant_job() for intern/fresher positions.
-        VietnamWorks renders job cards client-side via React hydration.
+        VietnamWorks renders job cards client-side via React — title text is
+        NOT in the <a> inner_text (it's empty), so we use page.evaluate()
+        to extract title + link from the rendered DOM via JavaScript.
         """
         jobs: list[Job] = []
         page: Optional[Page] = None
@@ -509,97 +483,87 @@ class JobScraper:
                         timeout=20000,
                     )
                 except Exception:
-                    logger.warning("[VietnamWorks] Job cards not rendered for '%s', trying fallback", keyword)
-                    # Fallback: wait a bit more
-                    try:
-                        await page.wait_for_selector(
-                            "a[href*='-jv'], a[href*='/viec-lam/']",
-                            timeout=10000,
-                        )
-                    except Exception:
-                        logger.warning("[VietnamWorks] No job elements found for keyword '%s'", keyword)
+                    logger.warning("[VietnamWorks] Job cards not rendered for '%s'", keyword)
 
                 await self._human_scroll(page, steps=2)
                 await self._random_delay(1, 2)
 
-                selector_chains = [
-                    # Strategy 1: Current VietnamWorks layout (2025-2026)
-                    # .new-job-card is the actual job card after React renders
-                    {
-                        "container": ".new-job-card",
-                        "title": "a[href*='-jv'], a[href*='/viec-lam/'], h3 a, h2 a",
-                    },
-                    # Strategy 2: block-job-list wrapper
-                    {
-                        "container": ".block-job-list .job-item, .search-result-listJob .job-item",
-                        "title": "a[href*='-jv'], h3 a, h2 a, a",
-                    },
-                    # Strategy 3: generic fallbacks
-                    {
-                        "container": "div[class*='JobCard'], div[class*='job-card']",
-                        "title": "a[class*='title'], h3 a, h2 a, a[class*='job']",
-                    },
-                    {
-                        "container": "div[class*='job-item'], div[class*='search-result']",
-                        "title": "a[href*='vietnamworks.com'], a[href*='/job/'], h3 a, h2 a, a",
-                    },
-                ]
+                # Use JavaScript to extract jobs — VietnamWorks React SPA
+                # renders titles in elements where inner_text() from Playwright
+                # returns empty. JS extraction is more reliable.
+                raw_jobs = await page.evaluate("""() => {
+                    const results = [];
+                    // Strategy 1: .new-job-card with links
+                    const cards = document.querySelectorAll('.new-job-card');
+                    cards.forEach(card => {
+                        // Find all <a> tags with job links (-jv suffix)
+                        const links = card.querySelectorAll('a[href*="-jv"]');
+                        links.forEach(a => {
+                            const href = a.getAttribute('href') || '';
+                            // Get title from: textContent of the <a>, or any h3/h2/span inside
+                            let title = '';
+                            const titleEl = a.querySelector('h3, h2, span');
+                            if (titleEl) {
+                                title = titleEl.textContent.trim();
+                            }
+                            if (!title) {
+                                title = a.textContent.trim();
+                            }
+                            // Fallback: extract title from URL slug
+                            if (!title && href) {
+                                const slug = href.split('?')[0].replace(/-\\d+-jv$/, '').replace(/^\\//,'');
+                                title = slug.replace(/-/g, ' ');
+                            }
+                            if (href && title) {
+                                results.push({title, href});
+                            }
+                        });
+                    });
+                    // Strategy 2: any link with -jv pattern if strategy 1 fails
+                    if (results.length === 0) {
+                        const allLinks = document.querySelectorAll('a[href*="-jv"]');
+                        allLinks.forEach(a => {
+                            const href = a.getAttribute('href') || '';
+                            let title = a.textContent.trim();
+                            if (!title) {
+                                const slug = href.split('?')[0].replace(/-\\d+-jv$/, '').replace(/^\\//,'');
+                                title = slug.replace(/-/g, ' ');
+                            }
+                            if (href && title) {
+                                results.push({title, href});
+                            }
+                        });
+                    }
+                    return results;
+                }""")
 
-                for strategy_idx, strategy in enumerate(selector_chains):
-                    try:
-                        containers = await page.query_selector_all(strategy["container"])
-                        if not containers:
-                            continue
+                logger.info("[VietnamWorks] JS extracted %d raw job entries for '%s'", len(raw_jobs), keyword)
 
-                        logger.info(
-                            "[VietnamWorks] Strategy %d: found %d job containers",
-                            strategy_idx, len(containers),
-                        )
+                seen: set[str] = set()
+                for entry in raw_jobs:
+                    title = entry.get("title", "").strip()
+                    href = entry.get("href", "")
 
-                        parsed_count = 0
-                        for container in containers:
-                            try:
-                                link_el = await container.query_selector(strategy["title"])
-                                if not link_el:
-                                    # DEBUG: log inner HTML
-                                    if parsed_count < 3:
-                                        inner = await container.inner_html()
-                                        logger.info("[VietnamWorks] DEBUG container (no title match, strat %d): %s", strategy_idx, inner[:300])
-                                    parsed_count += 1
-                                    continue
-
-                                title = (await link_el.inner_text()).strip()
-                                href = await link_el.get_attribute("href")
-
-                                # DEBUG: log what we found
-                                if parsed_count < 5:
-                                    logger.info("[VietnamWorks] DEBUG strat %d: title='%s' href='%s'", strategy_idx, title[:80], str(href)[:120])
-                                parsed_count += 1
-
-                                if not title or not href:
-                                    continue
-
-                                full_link = urljoin("https://www.vietnamworks.com", href)
-
-                                if not _is_relevant_job(title):
-                                    logger.info("[VietnamWorks] Skipping irrelevant: %s", title[:80])
-                                    continue
-
-                                jobs.append(Job(
-                                    title=title,
-                                    link=full_link,
-                                    source="vietnamworks",
-                                ))
-                            except Exception as e:
-                                logger.debug("[VietnamWorks] Error parsing job card: %s", e)
-                                continue
-
-                        if jobs:
-                            break  # Got results, stop trying other strategies
-
-                    except Exception as e:
-                        logger.debug("[VietnamWorks] Strategy %d failed: %s", strategy_idx, e)
+                    if not title or not href or len(title) < 5:
                         continue
+
+                    full_link = urljoin("https://www.vietnamworks.com", href)
+                    # Remove tracking params for dedup
+                    full_link = full_link.split("?")[0]
+
+                    if full_link in seen:
+                        continue
+                    seen.add(full_link)
+
+                    if not _is_relevant_job(title):
+                        logger.debug("[VietnamWorks] Skipping irrelevant: %s", title[:80])
+                        continue
+
+                    jobs.append(Job(
+                        title=title,
+                        link=full_link,
+                        source="vietnamworks",
+                    ))
 
                 # If got jobs, skip remaining keywords
                 if jobs:
