@@ -34,7 +34,7 @@ class TelegramNotifier:
             f"🔔 *Job Intern mới\\!*\n\n"
             f"📌 *{title}*\n"
             f"🏢 Nguồn: `{source}`\n"
-            f"🔗 [Xem chi tiết]({job.link})"
+            f"🔗 [Xem chi tiết]({self._escape_url(job.link)})"
         )
 
     @staticmethod
@@ -48,6 +48,14 @@ class TelegramNotifier:
             else:
                 escaped += char
         return escaped
+
+    @staticmethod
+    def _escape_url(url: str) -> str:
+        """Escape special characters inside MarkdownV2 inline URL parentheses.
+
+        Inside [text](URL), only ')' and '\\' need escaping.
+        """
+        return url.replace("\\", "\\\\").replace(")", "\\)")
 
     async def send_message(self, text: str, parse_mode: str | None = "MarkdownV2") -> bool:
         """Send a single message to the configured chat. Returns True on success."""
@@ -98,8 +106,9 @@ class TelegramNotifier:
         for i, job in enumerate(jobs, start=1):
             title = self._escape_md(job.title)
             source = self._escape_md(job.source.upper())
+            escaped_link = self._escape_url(job.link)
             lines.append(
-                f"{i}\\. [{title}]({job.link})\n"
+                f"{i}\\. [{title}]({escaped_link})\n"
                 f"    🏢 `{source}`\n"
             )
 
